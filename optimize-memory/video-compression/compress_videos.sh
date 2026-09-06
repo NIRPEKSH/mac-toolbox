@@ -423,24 +423,37 @@ echo "(When a file finishes, the next one starts immediately — no wasted time)
 # NEXT_INDEX tracks which file to hand out next from the queue
 NEXT_INDEX=0
 
-# ACTIVE_PIDS maps PID -> file index for tracking active workers
-declare -A ACTIVE_PIDS
+# ACTIVE_PIDS is a simple space-separated list of PIDs (bash 3.2 compatible)
+# We avoid 'declare -A' (associative arrays) because macOS ships bash 3.2
+ACTIVE_PIDS=""
+
+# Helper: count words in ACTIVE_PIDS (= number of running workers)
+count_active() { echo $ACTIVE_PIDS | wc -w | tr -d ' '; }
+
+# Helper: remove a PID from the active list
+remove_pid() {
+    local remove=$1
+    local new_list=""
+    for p in $ACTIVE_PIDS; do
+        [ "$p" != "$remove" ] && new_list="$new_list $p"
+    done
+    ACTIVE_PIDS="$new_list"
+}
 
 # Seed the initial worker slots (up to MAX_PARALLEL or total files, whichever is smaller)
-while [ $NEXT_INDEX -lt $TOTAL_COUNT ] && [ ${#ACTIVE_PIDS[@]} -lt $MAX_PARALLEL ]; do
+while [ $NEXT_INDEX -lt $TOTAL_COUNT ] && [ "$(count_active)" -lt $MAX_PARALLEL ]; do
     compress_one "${VIDEO_FILES[$NEXT_INDEX]}" "$((NEXT_INDEX + 1))/$TOTAL_COUNT" &
-    ACTIVE_PIDS[$!]=$NEXT_INDEX
+    ACTIVE_PIDS="$ACTIVE_PIDS $!"
     NEXT_INDEX=$((NEXT_INDEX + 1))
 done
 
 # Main queue loop: wait for ANY worker to finish, then launch the next file
-while [ ${#ACTIVE_PIDS[@]} -gt 0 ]; do
-    # Wait for any one background job to finish (-n = return on first completion)
-    # Note: bash 4.3+ supports 'wait -n -p PID' but macOS bash 3.2 does not,
-    # so we poll each PID to find which one finished
+while [ "$(count_active)" -gt 0 ]; do
+    # Poll each active PID to find which one finished
+    # (bash 3.2 doesn't support 'wait -n', so we check manually)
     FINISHED_PID=""
     while [ -z "$FINISHED_PID" ]; do
-        for pid in "${!ACTIVE_PIDS[@]}"; do
+        for pid in $ACTIVE_PIDS; do
             if ! kill -0 "$pid" 2>/dev/null; then
                 # This PID is no longer running — it finished
                 wait "$pid" 2>/dev/null || true
@@ -452,13 +465,13 @@ while [ ${#ACTIVE_PIDS[@]} -gt 0 ]; do
         [ -z "$FINISHED_PID" ] && sleep 0.5
     done
 
-    # Remove the finished worker from the active set
-    unset "ACTIVE_PIDS[$FINISHED_PID]"
+    # Remove the finished worker from the active list
+    remove_pid "$FINISHED_PID"
 
     # If there are more files in the queue, launch the next one immediately
     if [ $NEXT_INDEX -lt $TOTAL_COUNT ]; then
         compress_one "${VIDEO_FILES[$NEXT_INDEX]}" "$((NEXT_INDEX + 1))/$TOTAL_COUNT" &
-        ACTIVE_PIDS[$!]=$NEXT_INDEX
+        ACTIVE_PIDS="$ACTIVE_PIDS $!"
         NEXT_INDEX=$((NEXT_INDEX + 1))
     fi
 done
