@@ -14,6 +14,7 @@ The script re-encodes your videos from H.264 to **H.265 (HEVC)** — a newer, mo
 - Resolution stays the same (1080p stays 1080p)
 - Quality is controlled by CRF (Constant Rate Factor) — the script targets CRF 28 which is visually indistinguishable from the original on normal screens
 - The encoder preset (`veryslow`) maximizes compression by trying every optimization technique available — same quality, smallest possible file
+- Uses a **job queue** — keeps all CPU slots busy at all times. When a short video finishes, the next one starts immediately (no waiting for a batch to complete)
 
 ---
 
@@ -56,10 +57,10 @@ chmod +x compress_videos.sh
 ## What happens when you run it
 
 1. **Scans** the folder for all video files (mp4, mkv, avi, mov, wmv, flv, webm, m4v, mpg)
-2. **Detects your CPU** and calculates how many files to encode in parallel
+2. **Detects your CPU** and calculates how many worker slots to run
 3. **Checks disk space** and warns you if it's tight
 4. **Shows a summary** of all files it will process
-5. **Encodes in batches** — multiple files in parallel for speed
+5. **Encodes via a job queue** — maintains N worker slots; when any file finishes, the next one starts immediately (no idle CPU time between files of different lengths)
 6. **Reports progress** every 5 minutes (which file, how long, ETA)
 7. **Moves originals** to an `originals/` subfolder (never deletes them)
 8. **Prints a final summary** with per-file and total space savings
@@ -74,7 +75,7 @@ chmod +x compress_videos.sh
 ║  Preset:  veryslow (CRF 28)                                     ║
 ║  CPU:     Apple M1 Pro                                           ║
 ║  Cores:   8 cores, 16 GB RAM                                    ║
-║  Plan:    2 parallel jobs, 4 batches                             ║
+║  Workers: 2 parallel slots (job queue)                            ║
 ╚══════════════════════════════════════════════════════════════════╝
 
 ...

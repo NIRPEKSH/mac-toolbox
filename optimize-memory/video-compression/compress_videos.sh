@@ -187,7 +187,6 @@ format_time() {
 # ═══════════════════════════════════════════════════════════════════════════
 
 TOTAL_COUNT=${#VIDEO_FILES[@]}
-TOTAL_BATCHES=$(( (TOTAL_COUNT + MAX_PARALLEL - 1) / MAX_PARALLEL ))
 
 echo ""
 echo "╔══════════════════════════════════════════════════════════════════╗"
@@ -199,7 +198,7 @@ printf "║  %-62s║\n" "Files:   $TOTAL_COUNT videos ($(human_size $TOTAL_ORIG
 printf "║  %-62s║\n" "Preset:  $PRESET (CRF $CRF)"
 printf "║  %-62s║\n" "CPU:     $CPU_NAME"
 printf "║  %-62s║\n" "Cores:   $TOTAL_CORES cores, ${TOTAL_RAM} GB RAM"
-printf "║  %-62s║\n" "Plan:    $MAX_PARALLEL parallel jobs, $TOTAL_BATCHES batches"
+printf "║  %-62s║\n" "Workers: $MAX_PARALLEL parallel slots (job queue)"
 echo "║                                                                 ║"
 echo "║  *** 100% LOCAL — no data leaves your machine ***               ║"
 echo "║                                                                 ║"
@@ -383,8 +382,26 @@ export -f progress_monitor
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# MAIN LOOP — process files in batches of MAX_PARALLEL
+# MAIN LOOP — job queue with N worker slots
 # ═══════════════════════════════════════════════════════════════════════════
+#
+# Instead of fixed batches (where a fast file finishes and its slot sits idle
+# until the slow file in the same batch completes), we use a job queue:
+#
+#   - Maintain N worker slots running at all times
+#   - The moment ANY file finishes, the next file from the queue starts
+#   - No CPU time is wasted waiting for a batch to complete
+#
+# Example with 2 slots and files of 60min, 15min, 40min, 20min:
+#
+#   Old (fixed batches):
+#     Batch 1: [60min] [15min] → slot 2 idle for 45min → total ~100min
+#     Batch 2: [40min] [20min] → slot 2 idle for 20min
+#
+#   New (job queue):
+#     Slot 1: [60min]          [20min]    → total ~80min
+#     Slot 2: [15min] [40min]  [done]
+#     The 40min file starts as soon as the 15min file finishes!
 
 GLOBAL_START=$(date +%s)
 
@@ -400,38 +417,50 @@ cleanup() {
 }
 trap cleanup EXIT
 
-BATCH_NUM=1
-FILE_INDEX=0
+echo "Starting compression: $TOTAL_COUNT files, $MAX_PARALLEL worker slots (job queue)..."
+echo "(When a file finishes, the next one starts immediately — no wasted time)"
 
-echo "Starting compression: $TOTAL_COUNT files in $TOTAL_BATCHES batches of $MAX_PARALLEL..."
+# NEXT_INDEX tracks which file to hand out next from the queue
+NEXT_INDEX=0
 
-while [ $FILE_INDEX -lt $TOTAL_COUNT ]; do
-    # Collect files for this batch
-    BATCH_FILES=()
-    BATCH_INDICES=()
-    for (( j=0; j<MAX_PARALLEL && FILE_INDEX<TOTAL_COUNT; j++, FILE_INDEX++ )); do
-        BATCH_FILES+=("${VIDEO_FILES[$FILE_INDEX]}")
-        BATCH_INDICES+=("$((FILE_INDEX + 1))/$TOTAL_COUNT")
+# ACTIVE_PIDS maps PID -> file index for tracking active workers
+declare -A ACTIVE_PIDS
+
+# Seed the initial worker slots (up to MAX_PARALLEL or total files, whichever is smaller)
+while [ $NEXT_INDEX -lt $TOTAL_COUNT ] && [ ${#ACTIVE_PIDS[@]} -lt $MAX_PARALLEL ]; do
+    compress_one "${VIDEO_FILES[$NEXT_INDEX]}" "$((NEXT_INDEX + 1))/$TOTAL_COUNT" &
+    ACTIVE_PIDS[$!]=$NEXT_INDEX
+    NEXT_INDEX=$((NEXT_INDEX + 1))
+done
+
+# Main queue loop: wait for ANY worker to finish, then launch the next file
+while [ ${#ACTIVE_PIDS[@]} -gt 0 ]; do
+    # Wait for any one background job to finish (-n = return on first completion)
+    # Note: bash 4.3+ supports 'wait -n -p PID' but macOS bash 3.2 does not,
+    # so we poll each PID to find which one finished
+    FINISHED_PID=""
+    while [ -z "$FINISHED_PID" ]; do
+        for pid in "${!ACTIVE_PIDS[@]}"; do
+            if ! kill -0 "$pid" 2>/dev/null; then
+                # This PID is no longer running — it finished
+                wait "$pid" 2>/dev/null || true
+                FINISHED_PID=$pid
+                break
+            fi
+        done
+        # Brief sleep to avoid busy-waiting (0.5s is plenty — encodes take minutes)
+        [ -z "$FINISHED_PID" ] && sleep 0.5
     done
 
-    echo ""
-    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    echo "  BATCH $BATCH_NUM of $TOTAL_BATCHES (${#BATCH_FILES[@]} files)"
-    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    # Remove the finished worker from the active set
+    unset "ACTIVE_PIDS[$FINISHED_PID]"
 
-    # Launch all files in this batch as background processes
-    PIDS=()
-    for idx in "${!BATCH_FILES[@]}"; do
-        compress_one "${BATCH_FILES[$idx]}" "${BATCH_INDICES[$idx]}" &
-        PIDS+=($!)
-    done
-
-    # Wait for all jobs in this batch to finish before starting the next batch
-    for pid in "${PIDS[@]}"; do
-        wait "$pid" 2>/dev/null || true
-    done
-
-    BATCH_NUM=$((BATCH_NUM + 1))
+    # If there are more files in the queue, launch the next one immediately
+    if [ $NEXT_INDEX -lt $TOTAL_COUNT ]; then
+        compress_one "${VIDEO_FILES[$NEXT_INDEX]}" "$((NEXT_INDEX + 1))/$TOTAL_COUNT" &
+        ACTIVE_PIDS[$!]=$NEXT_INDEX
+        NEXT_INDEX=$((NEXT_INDEX + 1))
+    fi
 done
 
 # Stop the progress monitor
