@@ -16,6 +16,12 @@
 # ║    - Prints a full summary at the end                                   ║
 # ║                                                                         ║
 # ║  Supported formats: mp4, mkv, avi, mov, wmv, flv, webm, m4v, mpg       ║
+# ║                                                                         ║
+# ║  PRIVACY: This script runs 100% locally on your machine.               ║
+# ║  No data is sent over the network. No telemetry. No analytics.         ║
+# ║  Your files never leave your computer.                                  ║
+# ║                                                                         ║
+# ║  Source: https://github.com/NIRPEKSH/mac-toolbox                       ║
 # ╚══════════════════════════════════════════════════════════════════════════╝
 #
 
@@ -194,6 +200,8 @@ printf "║  %-62s║\n" "Preset:  $PRESET (CRF $CRF)"
 printf "║  %-62s║\n" "CPU:     $CPU_NAME"
 printf "║  %-62s║\n" "Cores:   $TOTAL_CORES cores, ${TOTAL_RAM} GB RAM"
 printf "║  %-62s║\n" "Plan:    $MAX_PARALLEL parallel jobs, $TOTAL_BATCHES batches"
+echo "║                                                                 ║"
+echo "║  *** 100% LOCAL — no data leaves your machine ***               ║"
 echo "║                                                                 ║"
 echo "╚══════════════════════════════════════════════════════════════════╝"
 echo ""
